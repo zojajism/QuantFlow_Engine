@@ -54,3 +54,28 @@ class IndicatorBuffer:
     def get_len(self, key: Keys, indicator: str) -> int:
         dq = self.get_or_create(key, indicator)
         return len(dq)
+
+    # English-only comments
+    def last_value(self, key: Keys, indicator: str, field: str = "value", default=None):
+        """
+        Return the last single value for an indicator.
+        Assumes each point is a dict like {"ts": ..., "value": ...}.
+        Change `field` if you store a different key (e.g., "atr").
+        """
+        dq = self.get_or_create(key, indicator)
+        if not dq:
+            return default
+        last_point = dq[-1]
+        return last_point.get(field, default)
+
+    def last_values(self, key: Keys, indicator: str, n: int, field: str = "value"):
+        """
+        Return the last `n` values for an indicator, in ascending time order.
+        If fewer than `n` points exist, returns all available.
+        """
+        if n <= 0:
+            return []
+        dq = self.get_or_create(key, indicator)
+        # Slice last n points, preserve ASC order
+        items = list(dq)[-n:] if n <= len(dq) else list(dq)
+        return [p.get(field) for p in items]

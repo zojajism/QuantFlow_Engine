@@ -14,7 +14,7 @@ def setup_logger():
         is_dev = False
 
     file_handler = TimedRotatingFileHandler(
-        "quantflow_DataCollector.log",
+        "quantflow_Engine.log",
         when="midnight",   
         interval=1,
         backupCount=7,     
@@ -39,7 +39,7 @@ def setup_logger():
         handlers=handlers
     )
 
-    logger = logging.getLogger("QuantFlow_DataCollector")
+    logger = logging.getLogger("QuantFlow_Engine")
     logger.info(
                 json.dumps({
                         "EventCode": 0,

@@ -4,8 +4,15 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Literal, Protocol, Any
 from datetime import datetime, timezone
 import logging
-
 from database.insert_bios_signal import insert_bios_signal_to_db_async
+from database.insert_order_book import insert_order_book_to_db_async
+from buffers.indicator_buffer import Keys as IKeys
+from telegram_notifier import notify_telegram, ChatType, ChatType
+
+from buffers.candle_buffer import Keys as CKeys         
+from buffers.indicator_buffer import Keys as IKeys
+import buffers.buffer_initializer as buffers
+from buffers.indicator_buffer import IndicatorBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -19,28 +26,117 @@ class DataProvider(Protocol):
 # ---------- Portfolio (paper trading) ----------
 @dataclass
 class Portfolio:
-    balance_usd: float = 1000.0
+    balance_usd: float = 10000.0
     position_qty: float = 0.0
     entry_price: float = 0.0
+    fees: float = 0.0
+    stop_loss: float = 0.0
+    take_profit: float = 0.0
 
     def is_flat(self) -> bool:
         return self.position_qty == 0.0
 
-    def open_long_full(self, price: float):
-        if not self.is_flat() or price <= 0:
-            return
-        qty = self.balance_usd / price
-        self.position_qty = qty
-        self.entry_price = price
-        self.balance_usd = 0.0
+    async def open_long_full(self, price: float, atr: float, symbol: str):
+       
+        try:
 
-    def close_long_all(self, price: float):
+            if not self.is_flat() or price <= 0:
+                return
+            
+            self.fees = (self.balance_usd / 100 * 0.1)
+            self.balance_usd = self.balance_usd - self.fees
+            qty = self.balance_usd / price
+            self.position_qty = qty
+            self.entry_price = price
+            self.balance_usd = 0.0
+            self.stop_loss = price - (atr * 1.2)
+            self.take_profit = price + ((atr * 1.2) * 1.5)
+            
+            notify_telegram(
+                            f"🔵 QuantFlow_Engine \n Buy: {symbol} \n Price: {round(self.entry_price,2)} "
+                            f"\n Balance: {round(self.balance_usd,2)} \n Quantity: {round(qty,4)} "
+                            f"\n ATR: {round(atr,2)} "
+                            f"\n TP: {round(self.take_profit,2)} \n SL: {round(self.stop_loss,2)} \n Fees: {round(self.fees,2)}",
+                            ChatType.INFO
+            )
+
+            await insert_order_book_to_db_async(
+                        exchange="Binance",
+                        symbol=symbol,
+                        timeframe="1m",
+                        side="BUY",
+                        event="Signal",
+                        balance=self.balance_usd,
+                        price=self.entry_price,
+                        quantity=qty,
+                        stop_loss=self.stop_loss,
+                        take_profit=self.take_profit,
+                        fees=self.fees
+                    )
+            logger.info(f" Buy Order Inserted .")
+
+        except Exception as e:
+                logger.exception("open_long_full failed: %s", e)  # includes traceback
+                #print(f"open_long_full failed: {e}\n{traceback.format_exc()}", flush=True)    
+
+
+    async def close_long_all(self, price: float, symbol: str):
+        print(f"Balance: {self.balance_usd}, Position qty: {self.position_qty}, tick_price: {price}")
+
         if self.is_flat() or price <= 0:
             return
-        self.balance_usd = self.position_qty * price
-        self.position_qty = 0.0
-        self.entry_price = 0.0
+        
+        event = ""
+        event_desc = ""
+        event_sign =""
 
+        if price >= self.take_profit:
+            event = "TP"
+            event_sign = "✅"
+            event_desc = "Profit"
+        if price <= self.stop_loss:
+            event = "SL"
+            event_sign = "❌"
+            event_desc = "Loss"
+
+        if event != "":
+
+            self.balance_usd = self.position_qty * price
+            self.fees = (self.balance_usd / 100 * 0.1)
+            self.balance_usd = self.balance_usd - self.fees
+            self.position_qty = 0.0
+            self.entry_price = 0.0
+            self.take_profit = 0.0
+            self.stop_loss =0.0
+
+            try:
+                notify_telegram(
+                                f"{event_sign} QuantFlow_Engine \n Sell: {symbol} \n {event_desc} \n Price: {round(self.entry_price, 2)} "
+                                f"\n Balance: {round(self.balance_usd,2)} \n Quantity: {round(self.position_qty,4)} "
+                                f"\n Fees: {round(self.fees,2)}",
+                                ChatType.INFO
+                )
+
+                await insert_order_book_to_db_async(
+                            exchange="Binance",
+                            symbol=symbol,
+                            timeframe="1m",
+                            side="SELL",
+                            event=event,
+                            balance=self.balance_usd,
+                            price=self.entry_price,
+                            quantity=self.position_qty,
+                            stop_loss=self.stop_loss,
+                            take_profit=self.take_profit,
+                            fees=self.fees
+                        )
+                logger.info(f" Sell Order Inserted .")
+
+            except Exception as e:
+                    logger.exception("close_long_full failed: %s", e)  # includes traceback
+                    #print(f"open_long_full failed: {e}\n{traceback.format_exc()}", flush=True)   
+                    # 
+        
 # ---------- Trade Log ----------
 @dataclass
 class Trade:
@@ -119,9 +215,13 @@ class DecisionEngine:
 
             close_price = self._get_close_price("1m", offset=0) or 0.0
 
-            self._paper_execute(final_signal, ts, tf="1m")
-
             logger.info(f"[SIGNAL] symbol: {self.symbol}, timeframe=1m, close_price={close_price}, score={total_score:.2f}, raw signal={raw_signal}, final signal={final_signal}")
+
+            try:
+                await self._paper_execute(final_signal, ts, tf="1m")
+            except Exception as e:
+                logger.exception("_paper_execute failed: %s", e) 
+                notify_telegram(f"❌ QuantFlow_Engine \n _paper_execute failed: \n {str(e)})", ChatType.ALERT)
 
             if timestamp_dt:
                 await insert_bios_signal_to_db_async(
@@ -135,8 +235,11 @@ class DecisionEngine:
                     final_signal=final_signal,   # "BUY"/"SELL"/"HOLD"
                     bios="",                     # empty for 1m
                 )
-            return final_signal
 
+            logger.info(f"[bios_signal] Inserted: {self.symbol}, timeframe=1m, raw signal={raw_signal}, final signal={final_signal}")
+
+            return final_signal
+        
         return "HOLD"
 
     # ------- Helpers to fetch price/time/value from indicator points -------
@@ -261,16 +364,23 @@ class DecisionEngine:
         return "HOLD"
 
     # ------- Paper execution -------
-    def _paper_execute(self, signal: Signal, ts: int, tf: str):
+    async def _paper_execute(self, signal: Signal, ts: int, tf: str):
+ 
         price = self._get_close_price(tf, offset=0)
         if price is None or price <= 0:
             return
 
         if signal == "BUY" and self.portfolio.is_flat():
-            self.portfolio.open_long_full(price)
+            k = IKeys(exchange=self.exchange, symbol=self.symbol, timeframe="1m")
+            last_atr = buffers.INDICATOR_BUFFER.last_value(k, "atr")
+            await self.portfolio.open_long_full(price, last_atr, self.symbol)
             self.trades.append(Trade(ts, self.symbol, "BUY", price, self.portfolio.position_qty))
-
+        '''
         elif signal == "SELL" and not self.portfolio.is_flat():
             qty = self.portfolio.position_qty
             self.portfolio.close_long_all(price)
             self.trades.append(Trade(ts, self.symbol, "SELL", price, qty))
+        '''
+
+    async def _paper_execute_sell_by_tick(self, tick_price: float):
+        await self.portfolio.close_long_all(tick_price, self.symbol)
