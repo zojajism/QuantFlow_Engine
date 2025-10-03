@@ -16,7 +16,7 @@ def get_engine(exchange: str, symbol: str) -> DecisionEngine:
         ENGINES[key] = DecisionEngine(exchange=exchange, symbol=symbol, dp=dp)
         ENGINES[key].bias_state["1h"] = get_last_bios_from_db("Binance", "ETH/USDT", "1h")
         ENGINES[key].bias_state["4h"] = get_last_bios_from_db("Binance", "ETH/USDT", "4h")
-        print(f"Bios for 1h: {ENGINES[key].bias_state["1h"]}")
-        print(f"Bios for 4h: {ENGINES[key].bias_state["4h"]}")
+        print(f'Bios for 1h: {ENGINES[key].bias_state['1h']}')
+        print(f'Bios for 4h: {ENGINES[key].bias_state['4h']}')
                 
     return ENGINES[key]
