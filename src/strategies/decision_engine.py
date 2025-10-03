@@ -33,6 +33,9 @@ class Portfolio:
     stop_loss: float = 0.0
     take_profit: float = 0.0
 
+    net_profit_predict: float = 0.0
+    net_loss_predict: float = 0.0
+
     def is_flat(self) -> bool:
         return self.position_qty == 0.0
 
@@ -43,6 +46,23 @@ class Portfolio:
             if not self.is_flat() or price <= 0:
                 return
             
+            # Compare TP to Fees
+            _fee_on_buy = (self.balance_usd / 100 * 0.1)
+            _qty = (self.balance_usd - _fee_on_buy) / price
+            _tp = price + (atr * 1.5)
+            _new_balance = _qty * _tp
+            _fee_on_sell = (_new_balance / 100 * 0.1)
+            
+            self.net_profit_predict = (_new_balance - _fee_on_sell) - (self.balance_usd)
+            
+            self.net_loss_predict = (price - (atr * 1.2)) * _qty
+            self.net_loss_predict = self.net_loss_predict - (self.net_loss_predict / 100 * 0.1)
+            self.net_loss_predict = self.balance_usd - self.net_loss_predict
+            
+            if self.net_profit_predict < (_fee_on_buy + _fee_on_sell) * 1.5:
+                return
+            #==============================================
+
             self.fees = (self.balance_usd / 100 * 0.1)
             self.balance_usd = self.balance_usd - self.fees
             qty = self.balance_usd / price
@@ -50,20 +70,20 @@ class Portfolio:
             self.entry_price = price
             self.balance_usd = 0.0
             self.stop_loss = price - (atr * 1.2)
-            self.take_profit = price + ((atr * 1.2) * 1.5)
+            self.take_profit = price + (atr * 1.5)
             
             notify_telegram(
                             f"🔵 QuantFlow_Engine \n Buy: {symbol} \n Price: {round(self.entry_price,2)} "
-                            f"\n Balance: {round(self.balance_usd,2)} \n Quantity: {round(qty,4)} "
+                            f"\n Amount: {round(qty * price,2)} \n Quantity: {round(qty,4)} "
                             f"\n ATR: {round(atr,2)} "
-                            f"\n TP: {round(self.take_profit,2)} \n SL: {round(self.stop_loss,2)} \n Fees: {round(self.fees,2)}",
+                            f"\n TP: {round(self.take_profit,2)} \n SL: {round(self.stop_loss,2)} \n Buy fee: {round(self.fees,2)}",
                             ChatType.INFO
             )
 
             await insert_order_book_to_db_async(
                         exchange="Binance",
                         symbol=symbol,
-                        timeframe="1m",
+                        timeframe="15m",
                         side="BUY",
                         event="Signal",
                         balance=self.balance_usd,
@@ -93,11 +113,13 @@ class Portfolio:
         if price >= self.take_profit:
             event = "TP"
             event_sign = "✅"
-            event_desc = "Profit"
+            event_desc = "Net Profit: "
+            profit_Loss = self.net_profit_predict
         if price <= self.stop_loss:
             event = "SL"
             event_sign = "❌"
-            event_desc = "Loss"
+            event_desc = "Net Loss: "
+            profit_Loss = self.net_loss_predict
 
         if event != "":
 
@@ -111,16 +133,16 @@ class Portfolio:
 
             try:
                 notify_telegram(
-                                f"{event_sign} QuantFlow_Engine \n Sell: {symbol} \n {event_desc} \n Price: {round(self.entry_price, 2)} "
-                                f"\n Balance: {round(self.balance_usd,2)} \n Quantity: {round(self.position_qty,4)} "
-                                f"\n Fees: {round(self.fees,2)}",
+                                f"{event_sign} QuantFlow_Engine \n Sell: {symbol} \n {event_desc} {round(profit_Loss,2)} \n Price: {round(price, 2)} "
+                                f"\n Balance: {round(self.balance_usd,2)} "
+                                f"\n Sell fee: {round(self.fees,2)}",
                                 ChatType.INFO
                 )
 
                 await insert_order_book_to_db_async(
                             exchange="Binance",
                             symbol=symbol,
-                            timeframe="1m",
+                            timeframe="15m",
                             side="SELL",
                             event=event,
                             balance=self.balance_usd,
@@ -155,7 +177,7 @@ class DecisionEngine:
     portfolio: Portfolio = field(default_factory=Portfolio)
 
     # Bias state updated only on HTF candle close
-    bias_state: Dict[str, Bias] = field(default_factory=lambda: {"15m": "Neutral", "1h": "Neutral"})
+    bias_state: Dict[str, Bias] = field(default_factory=lambda: {"1h": "Neutral", "4h": "Neutral"})
     trades: list = field(default_factory=list)
 
     # Indicators that can carry a reliable close_price/close_time
@@ -173,8 +195,8 @@ class DecisionEngine:
     async def on_candle_close(self, tf: str, ts: int) -> Signal:
         """
         Call this on every candle close.
-          - If tf in ('15m','1h'): update bias; insert bias row; return HOLD.
-          - If tf == '1m': compute score, map to signal, apply bias filter, execute, insert signal row.
+          - If tf in ('1h','4h'): update bias; insert bias row; return HOLD.
+          - If tf == '15m': compute score, map to signal, apply bias filter, execute, insert signal row.
         Note: ts is a unix epoch seconds (optional fallback); we prefer close_time from indicator points.
         """
         # Get canonical timestamp & close_price from indicator points (offset=0)
@@ -184,7 +206,7 @@ class DecisionEngine:
             timestamp_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
 
         # --- HTF: update bias & insert row ---
-        if tf in ("15m", "1h"):
+        if tf in ("1h", "4h"):
             score_for_bias = self._compute_total_score(tf)
             bias = self._score_to_bias(score_for_bias)
             self.bias_state[tf] = bias
@@ -208,17 +230,17 @@ class DecisionEngine:
             return "HOLD"
 
         # --- LTF: compute signal, filter by bias, execute & insert row ---
-        if tf == "1m":
-            total_score = self._compute_total_score(tf="1m")
+        if tf == "15m":
+            total_score = self._compute_total_score(tf)
             raw_signal = self._score_to_signal(total_score)
             final_signal = self._apply_bias_filter(raw_signal)
 
-            close_price = self._get_close_price("1m", offset=0) or 0.0
+            close_price = self._get_close_price(tf, offset=0) or 0.0
 
-            logger.info(f"[SIGNAL] symbol: {self.symbol}, timeframe=1m, close_price={close_price}, score={total_score:.2f}, raw signal={raw_signal}, final signal={final_signal}")
+            logger.info(f"[SIGNAL] symbol: {self.symbol}, timeframe={tf}, close_price={close_price}, score={total_score:.2f}, raw signal={raw_signal}, final signal={final_signal}")
 
             try:
-                await self._paper_execute(final_signal, ts, tf="1m")
+                await self._paper_execute(final_signal, ts, tf=tf)
             except Exception as e:
                 logger.exception("_paper_execute failed: %s", e) 
                 notify_telegram(f"❌ QuantFlow_Engine \n _paper_execute failed: \n {str(e)})", ChatType.ALERT)
@@ -227,7 +249,7 @@ class DecisionEngine:
                 await insert_bios_signal_to_db_async(
                     exchange=self.exchange,
                     symbol=self.symbol,
-                    timeframe="1m",
+                    timeframe="15m",
                     timestamp=timestamp_dt,      # already UTC datetime
                     close_price=close_price,
                     score=total_score,
@@ -236,7 +258,7 @@ class DecisionEngine:
                     bios="",                     # empty for 1m
                 )
 
-            logger.info(f"[bios_signal] Inserted: {self.symbol}, timeframe=1m, raw signal={raw_signal}, final signal={final_signal}")
+            logger.info(f"[bios_signal] Inserted: {self.symbol}, timeframe=15m, raw signal={raw_signal}, final signal={final_signal}")
 
             return final_signal
         
@@ -355,12 +377,17 @@ class DecisionEngine:
         return "Neutral"
 
     def _apply_bias_filter(self, raw: Signal) -> Signal:
-        b15 = self.bias_state.get("15m", "Neutral")
         b1h = self.bias_state.get("1h", "Neutral")
+        b4h = self.bias_state.get("4h", "Neutral")
+        
+        print(f"raw: {raw}")
+        print(f"b1h: {b1h}")
+        print(f"b4h: {b4h}")
+
         if raw == "BUY":
-            return "BUY" if (b15 == "Bullish" and b1h == "Bullish") else "HOLD"
+            return "BUY" if (b1h == "Bullish" and b4h in ("Bullish", "Neutral")) else "HOLD"
         if raw == "SELL":
-            return "SELL" if (b15 == "Bearish" and b1h == "Bearish") else "HOLD"
+            return "SELL" if (b1h == "Bearish" and b4h == "Bearish") else "HOLD"
         return "HOLD"
 
     # ------- Paper execution -------
@@ -371,7 +398,7 @@ class DecisionEngine:
             return
 
         if signal == "BUY" and self.portfolio.is_flat():
-            k = IKeys(exchange=self.exchange, symbol=self.symbol, timeframe="1m")
+            k = IKeys(exchange=self.exchange, symbol=self.symbol, timeframe="15m")
             last_atr = buffers.INDICATOR_BUFFER.last_value(k, "atr")
             await self.portfolio.open_long_full(price, last_atr, self.symbol)
             self.trades.append(Trade(ts, self.symbol, "BUY", price, self.portfolio.position_qty))

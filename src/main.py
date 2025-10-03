@@ -14,6 +14,7 @@ from indicators.indicator_calculator import compute_and_append_on_close
 from database.insert_indicators import insert_indicators_to_db_async
 from telegram_notifier import notify_telegram, ChatType, start_telegram_notifier, close_telegram_notifier, ChatType
 
+
 Candle_SUBJECT = "candles.>"   
 Candle_STREAM = "STREAM_CANDLES"   
 
@@ -41,7 +42,7 @@ async def main():
         js = nc.jetstream()
 
         symbols = ["ETH/USDT"]
-        timeframes = ["1m", "15m", "1h"]
+        timeframes = ["15m", "1h", "4h"]
         CANDLE_BUFFER, INDICATOR_BUFFER = buffers.init_buffers("Binance", symbols, timeframes)
         
         logger.info(
@@ -138,7 +139,7 @@ async def main():
                         candle_data = json.loads(msg.data.decode("utf-8"))
                         symbol = candle_data["symbol"]
 
-                        if timeframe in ("1m", "15m", "1h") and symbol.upper() == "ETH/USDT":
+                        if timeframe in ("15m", "1h", "4h") and symbol.upper() == "ETH/USDT":
                             
                             logger.info(f"Received from {msg.subject}: ")
                             candle_data["open_time"] = datetime.fromisoformat(candle_data["open_time"])
@@ -146,11 +147,12 @@ async def main():
                             candle_data["message_datetime"] = datetime.fromisoformat(candle_data["insert_ts"])
                             key = Keys("Binance", symbol, timeframe)
 
+                            engine = get_engine("Binance", "ETH/USDT")
+            
                             # 1) append candle to CandleBuffer
                             buffers.CANDLE_BUFFER.append(key, candle_data)
                             
-                            engine = get_engine("Binance", symbol)
- 
+
                             # 2) compute indicators from CandleBuffer and append to IndicatorBuffer
                             values = compute_and_append_on_close(
                                 key=key,
@@ -162,11 +164,11 @@ async def main():
                             # 3) Call DecisionEngine on candle close (update bias or trade)
                             close_ts = int(candle_data["close_time"].timestamp())
 
-                            if timeframe in ("15m", "1h"):
+                            if timeframe in ("1h", "4h"):
                                 # Update bias for HTFs on their own candle close
                                 await engine.on_candle_close(tf=timeframe, ts=close_ts)
 
-                            elif timeframe == "1m":
+                            elif timeframe == "15m":
                                 # Produce BUY/SELL/HOLD (entries only on 1m per v0.1) and paper-execute
                                 final_signal = await engine.on_candle_close(tf=timeframe, ts=close_ts)
                                 logger.info(f"[DE] {symbol} {timeframe} close @ {candle_data['close_time']} with price: {candle_data['close']},  signal={final_signal}, balance={engine.portfolio.balance_usd}, quantity={engine.portfolio.position_qty}")

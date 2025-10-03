@@ -119,3 +119,21 @@ def get_indicators_from_db(key: Keys, limit: int) -> List[Dict[str, Any]]:
         for row in reversed(rows)
     ]
     return indicators
+
+def get_last_bios_from_db(exchange: str, symbol: str, timeframe: str) -> str:
+    sql = """
+            select bios from bios_signal bs 
+            where 
+                exchange = %s
+                and symbol = %s
+                and timeframe = %s
+            order by "timestamp" desc
+            limit 1
+        """
+    with get_pg_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, (exchange, symbol, timeframe))
+        rows = cur.fetchall()
+
+    for row in reversed(rows):
+      return row[0]
+    
