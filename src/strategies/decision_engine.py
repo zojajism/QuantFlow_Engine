@@ -101,7 +101,7 @@ class Portfolio:
 
 
     async def close_long_all(self, price: float, symbol: str):
-        print(f"Balance: {self.balance_usd}, Position qty: {self.position_qty}, tick_price: {price}")
+        logger.info(f"Balance: {self.balance_usd}, Position qty: {self.position_qty}, tick_price: {price}")
 
         if self.is_flat() or price <= 0:
             return
